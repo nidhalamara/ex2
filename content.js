@@ -50,31 +50,37 @@
     return style.display !== "none" && style.visibility !== "hidden";
   }
 
-  function isMeaningfulOption(option) {
+  function isPlaceholderOption(option, index) {
     const label = normalizeText(option?.textContent);
     const value = String(option?.value ?? "").trim();
 
-    if (!label || !value || option.disabled) {
-      return false;
+    if (!label || option?.disabled) {
+      return true;
     }
 
     if (/^(choisir|selectionner|selectionnez|veuillez|select)/.test(label)) {
-      return false;
+      return true;
     }
 
     if (/^[-.]+$/.test(label)) {
-      return false;
+      return true;
     }
 
-    return true;
+    if (index === 0 && !value) {
+      return true;
+    }
+
+    return false;
   }
 
   function extractOptions(select) {
     return Array.from(select?.options || [])
-      .filter(isMeaningfulOption)
+      .map((option, index) => ({ option, index }))
+      .filter(({ option, index }) => !isPlaceholderOption(option, index))
       .map((option) => ({
-        value: String(option.value).trim(),
-        label: option.textContent.trim()
+        index: option.index,
+        value: String(option.option.value).trim(),
+        label: option.option.textContent.trim()
       }));
   }
 
@@ -106,6 +112,29 @@
     }
 
     return status;
+  }
+
+  function activateDropdown(select) {
+    if (!select) {
+      return;
+    }
+
+    try {
+      select.scrollIntoView({ behavior: "instant", block: "center", inline: "nearest" });
+    } catch (error) {
+      select.scrollIntoView();
+    }
+
+    select.focus();
+
+    const eventNames = ["pointerdown", "mousedown", "mouseup", "click"];
+    for (const eventName of eventNames) {
+      try {
+        select.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, view: window }));
+      } catch (error) {
+        console.debug(`Could not dispatch ${eventName} on dropdown.`, error);
+      }
+    }
   }
 
   function updateStatus(message, tone) {
@@ -214,31 +243,47 @@
     throw new Error("Could not find the gouvernorat, ville, and localite dropdowns on the page.");
   }
 
-  function selectValue(select, value) {
-    const nextValue = String(value);
+  function selectOption(select, optionData) {
+    activateDropdown(select);
 
-    if (select.value !== nextValue) {
-      select.value = nextValue;
+    let option = select.options?.[optionData.index];
+
+    if (!option || option.textContent.trim() !== optionData.label) {
+      option = Array.from(select.options).find((item) => {
+        return item.textContent.trim() === optionData.label && String(item.value).trim() === optionData.value;
+      });
     }
 
-    const option = Array.from(select.options).find((item) => String(item.value) === nextValue);
-    if (option) {
-      option.selected = true;
+    if (!option) {
+      throw new Error(`Could not find option "${optionData.label}" in the dropdown.`);
     }
+
+    select.selectedIndex = option.index;
+    option.selected = true;
+    select.value = option.value;
 
     select.dispatchEvent(new Event("input", { bubbles: true }));
     select.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   async function waitForUpdatedOptions(select, previousSignature) {
+    activateDropdown(select);
     await sleep(LOAD_WAIT_MS);
 
     const startedAt = Date.now();
     while (Date.now() - startedAt < OPTION_TIMEOUT_MS) {
+      activateDropdown(select);
+      const options = extractOptions(select);
       const nextSignature = buildOptionSignature(select);
-      if (!previousSignature || nextSignature !== previousSignature) {
-        return extractOptions(select);
+
+      if (!previousSignature && options.length > 0) {
+        return options;
       }
+
+      if (previousSignature && nextSignature !== previousSignature && options.length > 0) {
+        return options;
+      }
+
       await sleep(POLL_INTERVAL_MS);
     }
 
@@ -262,7 +307,7 @@
       );
 
       const previousVilleSignature = buildOptionSignature(dropdowns.ville);
-      selectValue(dropdowns.gouvernorat, gouvernoratOption.value);
+      selectOption(dropdowns.gouvernorat, gouvernoratOption);
       const villeOptions = await waitForUpdatedOptions(dropdowns.ville, previousVilleSignature);
       const villes = [];
 
@@ -274,7 +319,7 @@
         );
 
         const previousLocaliteSignature = buildOptionSignature(dropdowns.localite);
-        selectValue(dropdowns.ville, villeOption.value);
+        selectOption(dropdowns.ville, villeOption);
         const localiteOptions = await waitForUpdatedOptions(dropdowns.localite, previousLocaliteSignature);
 
         villes.push({
