@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Fiabilo Location Tree Scraper",
+  "version": "1.0.0",
+  "description": "Opens the Fiabilo pickup page, walks gouvernorat/ville/localite dropdowns, and downloads the hierarchy as JSON.",
+  "permissions": [
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://fiabilo.tn/*",
+    "https://www.fiabilo.tn/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Run Fiabilo scraper"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://fiabilo.tn/expediteur/pickup.php*",
+        "https://www.fiabilo.tn/expediteur/pickup.php*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
