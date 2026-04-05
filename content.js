@@ -9,6 +9,7 @@
   const DISCOVERY_TIMEOUT_MS = 20000;
   const OPTION_TIMEOUT_MS = 10000;
   const POLL_INTERVAL_MS = 300;
+  const CITY_TREE_SEED = window.FIABILO_CITY_TREE || {};
 
   const state = {
     autoStarted: false,
@@ -23,9 +24,37 @@
     return String(text || "")
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9]+/g, " ")
       .replace(/\s+/g, " ")
       .trim()
       .toLowerCase();
+  }
+
+  function buildComparableName(text) {
+    const normalized = normalizeText(text);
+
+    return {
+      normalized,
+      compact: normalized.replace(/\s+/g, ""),
+      sortedTokens: normalized.split(" ").filter(Boolean).sort().join(" ")
+    };
+  }
+
+  function labelsMatch(left, right) {
+    const a = buildComparableName(left);
+    const b = buildComparableName(right);
+
+    if (!a.normalized || !b.normalized) {
+      return false;
+    }
+
+    return (
+      a.normalized === b.normalized ||
+      a.compact === b.compact ||
+      a.sortedTokens === b.sortedTokens ||
+      a.normalized.includes(b.normalized) ||
+      b.normalized.includes(a.normalized)
+    );
   }
 
   function formatTimestamp(date) {
@@ -88,6 +117,10 @@
     return extractOptions(select)
       .map((option) => `${option.value}::${option.label}`)
       .join("|");
+  }
+
+  function findMatchingOption(options, label) {
+    return options.find((option) => labelsMatch(option.label, label)) || null;
   }
 
   function getStatusElement() {
@@ -248,9 +281,9 @@
 
     let option = select.options?.[optionData.index];
 
-    if (!option || option.textContent.trim() !== optionData.label) {
+    if (!option || !labelsMatch(option.textContent.trim(), optionData.label)) {
       option = Array.from(select.options).find((item) => {
-        return item.textContent.trim() === optionData.label && String(item.value).trim() === optionData.value;
+        return labelsMatch(item.textContent.trim(), optionData.label);
       });
     }
 
@@ -266,71 +299,146 @@
     select.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  async function waitForUpdatedOptions(select, previousSignature) {
-    activateDropdown(select);
+  async function waitForDependentOptions(getSelect, previousSignature, expectedLabels = []) {
+    const initialSelect = getSelect();
+    activateDropdown(initialSelect);
     await sleep(LOAD_WAIT_MS);
 
     const startedAt = Date.now();
+    let sawReset = false;
+
     while (Date.now() - startedAt < OPTION_TIMEOUT_MS) {
+      const select = getSelect();
+      if (!select) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+
       activateDropdown(select);
       const options = extractOptions(select);
       const nextSignature = buildOptionSignature(select);
+      const hasExpectedMatch = !expectedLabels.length || expectedLabels.some((label) => findMatchingOption(options, label));
 
-      if (!previousSignature && options.length > 0) {
+      if (!options.length || (previousSignature && nextSignature !== previousSignature)) {
+        sawReset = true;
+      }
+
+      if (!previousSignature && options.length > 0 && hasExpectedMatch) {
         return options;
       }
 
-      if (previousSignature && nextSignature !== previousSignature && options.length > 0) {
+      if (previousSignature && nextSignature !== previousSignature && options.length > 0 && hasExpectedMatch) {
+        return options;
+      }
+
+      if (sawReset && options.length > 0 && hasExpectedMatch) {
         return options;
       }
 
       await sleep(POLL_INTERVAL_MS);
     }
 
-    return extractOptions(select);
+    const latestSelect = getSelect();
+    return latestSelect ? extractOptions(latestSelect) : [];
   }
 
-  async function scrapeTree() {
-    const dropdowns = await waitForDropdowns();
-    const gouvernoratOptions = extractOptions(dropdowns.gouvernorat);
-    const gouvernorats = [];
+  function getSeededTree() {
+    return Object.entries(CITY_TREE_SEED).map(([gouvernoratLabel, villeLabels]) => {
+      return {
+        label: gouvernoratLabel,
+        villes: villeLabels.map((villeLabel) => ({ label: villeLabel }))
+      };
+    });
+  }
 
-    if (!gouvernoratOptions.length) {
-      throw new Error("The gouvernorat dropdown was found, but it has no selectable options.");
+  async function scrapeLocalitesFromSeed() {
+    const seededTree = getSeededTree();
+    const gouvernorats = [];
+    const unmatched = {
+      gouvernorats: [],
+      villes: []
+    };
+
+    if (!seededTree.length) {
+      throw new Error("The seeded gouvernorat list is empty.");
     }
 
-    for (let i = 0; i < gouvernoratOptions.length; i += 1) {
-      const gouvernoratOption = gouvernoratOptions[i];
+    for (let i = 0; i < seededTree.length; i += 1) {
+      const seededGouvernorat = seededTree[i];
+      const currentDropdowns = await waitForDropdowns();
+      const gouvernoratOptions = extractOptions(currentDropdowns.gouvernorat);
+      const gouvernoratOption = findMatchingOption(gouvernoratOptions, seededGouvernorat.label);
+
+      if (!gouvernoratOption) {
+        unmatched.gouvernorats.push(seededGouvernorat.label);
+        gouvernorats.push({
+          label: seededGouvernorat.label,
+          matched: false,
+          value: null,
+          villes: seededGouvernorat.villes.map((ville) => ({
+            label: ville.label,
+            matched: false,
+            value: null,
+            localites: []
+          }))
+        });
+        continue;
+      }
+
       updateStatus(
-        `Gouvernorat ${i + 1}/${gouvernoratOptions.length}\n${gouvernoratOption.label}\nLoading villes...`,
+        `Gouvernorat ${i + 1}/${seededTree.length}\n${seededGouvernorat.label}\nLoading seeded villes...`,
         "info"
       );
 
-      const previousVilleSignature = buildOptionSignature(dropdowns.ville);
-      selectOption(dropdowns.gouvernorat, gouvernoratOption);
-      const villeOptions = await waitForUpdatedOptions(dropdowns.ville, previousVilleSignature);
+      const previousVilleSignature = buildOptionSignature(currentDropdowns.ville);
+      selectOption(currentDropdowns.gouvernorat, gouvernoratOption);
+      await waitForDependentOptions(
+        () => resolveDropdowns()?.ville || null,
+        previousVilleSignature,
+        seededGouvernorat.villes.map((ville) => ville.label)
+      );
       const villes = [];
 
-      for (let j = 0; j < villeOptions.length; j += 1) {
-        const villeOption = villeOptions[j];
+      for (let j = 0; j < seededGouvernorat.villes.length; j += 1) {
+        const seededVille = seededGouvernorat.villes[j];
+        const refreshedDropdowns = await waitForDropdowns();
+        const currentVilleOptions = extractOptions(refreshedDropdowns.ville);
+        const villeOption = findMatchingOption(currentVilleOptions, seededVille.label);
+
+        if (!villeOption) {
+          unmatched.villes.push(`${seededGouvernorat.label} -> ${seededVille.label}`);
+          villes.push({
+            label: seededVille.label,
+            matched: false,
+            value: null,
+            localites: []
+          });
+          continue;
+        }
+
         updateStatus(
-          `Gouvernorat ${i + 1}/${gouvernoratOptions.length}: ${gouvernoratOption.label}\nVille ${j + 1}/${villeOptions.length}: ${villeOption.label}\nLoading localites...`,
+          `Gouvernorat ${i + 1}/${seededTree.length}: ${seededGouvernorat.label}\nVille ${j + 1}/${seededGouvernorat.villes.length}: ${seededVille.label}\nLoading localites...`,
           "info"
         );
 
-        const previousLocaliteSignature = buildOptionSignature(dropdowns.localite);
-        selectOption(dropdowns.ville, villeOption);
-        const localiteOptions = await waitForUpdatedOptions(dropdowns.localite, previousLocaliteSignature);
+        const previousLocaliteSignature = buildOptionSignature(refreshedDropdowns.localite);
+        selectOption(refreshedDropdowns.ville, villeOption);
+        const localiteOptions = await waitForDependentOptions(
+          () => resolveDropdowns()?.localite || null,
+          previousLocaliteSignature
+        );
 
         villes.push({
-          label: villeOption.label,
+          label: seededVille.label,
+          matched: true,
           value: villeOption.value,
           localites: localiteOptions
         });
       }
 
       gouvernorats.push({
-        label: gouvernoratOption.label,
+        label: seededGouvernorat.label,
+        matched: true,
         value: gouvernoratOption.value,
         villes
       });
@@ -339,7 +447,8 @@
     return {
       scrapedAt: new Date().toISOString(),
       sourceUrl: window.location.href,
-      gouvernorats
+      gouvernorats,
+      unmatched
     };
   }
 
@@ -357,11 +466,11 @@
     state.running = true;
 
     try {
-      updateStatus("Looking for the dropdowns...", "info");
-      const payload = await scrapeTree();
+      updateStatus("Looking for the dropdowns and loading the seeded villes...", "info");
+      const payload = await scrapeLocalitesFromSeed();
       downloadJson(payload);
       updateStatus(
-        `Finished.\n${payload.gouvernorats.length} gouvernorats collected.\nThe JSON file was downloaded to your browser.`,
+        `Finished.\n${payload.gouvernorats.length} seeded gouvernorats processed.\nThe JSON file was downloaded to your browser.`,
         "success"
       );
     } catch (error) {

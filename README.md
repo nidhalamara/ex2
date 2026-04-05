@@ -4,15 +4,17 @@ This is a very small Chrome extension that:
 
 - opens `https://fiabilo.tn/expediteur/pickup.php` when you click the extension icon
 - waits for the `Gouvernorat -> Ville -> Localite` dropdown tree
-- loops through every gouvernorat, then every ville inside it
-- waits `2s` after each selection so the dependent dropdown can load
-- downloads a JSON file with the full hierarchy
+- uses the hardcoded `gouvernorat -> ville` seed copied from `R.json`
+- loops through every seeded gouvernorat, then every seeded ville inside it
+- waits `2s` after each selection so the `localite` dropdown can load
+- downloads a JSON file with the seeded tree plus extracted localites
 
 ## Files
 
 - `manifest.json`: Chrome extension manifest
 - `background.js`: opens the target page or triggers the scraper again on the same page
-- `content.js`: does the dropdown scraping and downloads the JSON
+- `seed-data.js`: hardcoded seeded `gouvernorat -> ville` tree copied from `R.json`
+- `content.js`: selects each seeded pair and extracts the localites
 
 ## How To Use
 
